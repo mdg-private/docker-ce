@@ -9,6 +9,7 @@ import (
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/container"
+	"github.com/docker/docker/daemon/logger"
 	"github.com/docker/docker/libcontainerd"
 	"github.com/docker/docker/restartmanager"
 	"github.com/sirupsen/logrus"
@@ -47,7 +48,33 @@ func (daemon *Daemon) StateChanged(id string, e libcontainerd.StateInfo) error {
 
 		c.Lock()
 		c.StreamConfig.Wait()
+
+		// Save the LogDriver before calling Reset.  While c.Wait above will block
+		// until all the copying from containerd into StreamConfig occurs (it
+		// matches the s.Add/s.Done in CopyToPipe called by InitializeStdio), only
+		// Reset will block until these streams are copied into the LogDriver. Reset
+		// will set c.LogDriver to nil, so we grab it first.
+		//
+		// It will also call c.LogDriver.Close(), but for journald, Close only
+		// closes state related to reading from the journal (for `docker logs`,
+		// etc), not writing to it, so it's OK for us to use it after Close. (It
+		// also prints our final suppression message, if any.)
+		//
+		// It's also OK for us to grab this field because we've called c.Lock
+		// above.
+		logDriver := c.LogDriver
+
 		c.Reset(false)
+
+		if logDriver != nil {
+			// Now that we've copied everything into logDriver, send one last message.
+			stopMessage := fmt.Sprintf(
+				`{"type":"stop","exitCode":%d,"oomKilled":%v}`, e.ExitCode, e.OOMKilled)
+			if err := logDriver.Log(&logger.Message{Line: []byte(stopMessage), Source: "event"}); err != nil {
+				// At least the error will show up in journald without the appropriate tags...
+				logrus.Errorf("Failed to send 'stop' event to logging driver: %v", err)
+			}
+		}
 
 		// If daemon is being shutdown, don't let the container restart
 		restart, wait, err := c.RestartManager().ShouldRestart(e.ExitCode, daemon.IsShuttingDown() || c.HasBeenManuallyStopped, time.Since(c.StartedAt))
