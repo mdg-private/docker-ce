@@ -168,6 +168,10 @@ func (s *journald) Close() error {
 		reader.Close()
 	}
 	s.mu.Unlock()
+
+	// One last end-of-process suppression message.
+	s.finalSuppressMessage(s.stdoutRateLimit, "stdout")
+	s.finalSuppressMessage(s.stderrRateLimit, "stderr")
 	return nil
 }
 
